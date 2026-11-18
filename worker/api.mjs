@@ -16,6 +16,28 @@ async function getUser(request,env) {
   if(!token||!env.DB)return null;
   return env.DB.prepare('SELECT users.id, users.name, users.email FROM sessions JOIN users ON users.id=sessions.user_id WHERE token_hash=? AND expires_at>?').bind(await digest(token),now()).first();
 }
+async function passwordHash(password,salt) {
+  const key=await crypto.subtle.importKey('raw',encoder.encode(password),'PBKDF2',false,['deriveBits']);
+  return base64url(await crypto.subtle.deriveBits({name:'PBKDF2',salt:encoder.encode(salt),iterations:100000,hash:'SHA-256'},key,256));
+}
+async function createSession(userId,env) {
+  const token=random();
+  await env.DB.batch([
+    env.DB.prepare('DELETE FROM sessions WHERE expires_at<?').bind(now()),
+    env.DB.prepare('INSERT INTO sessions (token_hash,user_id,expires_at) VALUES (?,?,?)').bind(await digest(token),userId,now()+2592000),
+  ]);
+  return cookie(sessionCookie,token,2592000);
+}
+async function allowAuth(request,email,env) {
+  const ip=request.headers.get('CF-Connecting-IP')||'unknown';
+  const keys=[await digest('ip:'+ip),await digest('email:'+email)];
+  await env.DB.prepare('DELETE FROM auth_limits WHERE expires_at<?').bind(now()).run();
+  for(const key of keys){
+    const limit=await env.DB.prepare('INSERT INTO auth_limits (key,attempts,expires_at) VALUES (?,1,?) ON CONFLICT(key) DO UPDATE SET attempts=attempts+1 RETURNING attempts').bind(key,now()+900).first();
+    if(limit.attempts>20)return false;
+  }
+  return true;
+}
 function text(value,max,required=false) {
   if(typeof value!=='string'||value.length>max||(required&&!value.trim()))throw Error('Перевір заповнення полів');
   return value.trim();
@@ -64,7 +86,41 @@ async function verifyGoogle(token,clientId,nonce) {
 export async function serveApi(request,env={}) {
   const address=new URL(request.url),path=address.pathname;
   try {
-    if(path==='/api/session'&&request.method==='GET')return json({user:await getUser(request,env),googleEnabled:configured(env)});
+    if(path==='/api/session'&&request.method==='GET')return json({user:await getUser(request,env),googleEnabled:configured(env),emailEnabled:Boolean(env.DB)});
+    if(['/api/register','/api/login'].includes(path)&&request.method==='POST'){
+      if(!sameOrigin(request))return json({error:'Запит відхилено'},403);
+      if(!env.DB)return json({error:'Реєстрація тимчасово недоступна'},503);
+      const raw=await request.text();if(raw.length>8192)return json({error:'Запит завеликий'},413);
+      const body=JSON.parse(raw);
+      const email=text(body.email,254,true).toLowerCase();
+      if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))return json({error:'Вкажи коректну електронну адресу'},400);
+      if(!await allowAuth(request,email,env))return json({error:'Забагато спроб. Спробуй через 15 хвилин'},429);
+      const password=body.password;
+      if(typeof password!=='string'||password.length<12||password.length>128)return json({error:'Пароль має містити від 12 до 128 символів'},400);
+      let user;
+      if(path==='/api/register'){
+        const name=text(body.name,120,true);
+        const existing=await env.DB.prepare('SELECT user_id FROM credentials WHERE email=?').bind(email).first();
+        if(existing)return json({error:'Цей email уже зареєстровано. Увійди у свій профіль'},409);
+        const id=crypto.randomUUID(),salt=random(),hash=await passwordHash(password,salt);
+        try{
+          await env.DB.batch([
+            env.DB.prepare('INSERT INTO users (id,provider,subject,name,email,created_at) VALUES (?,?,?,?,?,?)').bind(id,'email','email:'+email,name,email,now()),
+            env.DB.prepare('INSERT INTO credentials (email,user_id,salt,password_hash) VALUES (?,?,?,?)').bind(email,id,salt,hash),
+          ]);
+        }catch{return json({error:'Не вдалося зареєструвати профіль. Перевір email і спробуй увійти'},409);}
+        user={id,name,email};
+      }else{
+        const credential=await env.DB.prepare('SELECT * FROM credentials WHERE email=?').bind(email).first();
+        const actual=await passwordHash(password,credential?.salt||'unregistered-account');
+        const expected=credential?.password_hash||'0'.repeat(actual.length);
+        let different=actual.length^expected.length;
+        for(let i=0;i<actual.length;i++)different|=actual.charCodeAt(i)^expected.charCodeAt(i);
+        if(!credential||different)return json({error:'Невірний email або пароль'},401);
+        user=await env.DB.prepare('SELECT id,name,email FROM users WHERE id=?').bind(credential.user_id).first();
+      }
+      const response=json({user});response.headers.set('Set-Cookie',await createSession(user.id,env));return response;
+    }
     if(path==='/auth/google'&&request.method==='GET'){
       if(!configured(env))return redirect('/?auth=setup');
       const state=random(),nonce=random(),verifier=random();
@@ -101,6 +157,11 @@ export async function serveApi(request,env={}) {
       if(token&&env.DB)await env.DB.prepare('DELETE FROM sessions WHERE token_hash=?').bind(await digest(token)).run();
       const result=json({ok:true});result.headers.set('Set-Cookie',cookie(sessionCookie,'',0));return result;
     }
+    if(path==='/api/broadcasts'&&request.method==='GET'){
+      if(!env.DB)return json({broadcasts:[]});
+      const rows=await env.DB.prepare('SELECT id,title,description,speaker,starts_at,youtube_id,status FROM broadcasts WHERE published=1 ORDER BY starts_at DESC').all();
+      return json({broadcasts:rows.results});
+    }
     if(path==='/api/content'&&request.method==='GET'){
       if(!env.DB)return json({mentors:[],recordings:[]});
       const [mentors,recordings]=await Promise.all([
@@ -119,19 +180,26 @@ export async function serveApi(request,env={}) {
       if(!env.ADMIN_SERVICE_TOKEN||await digest(authorization)!==await digest(env.ADMIN_SERVICE_TOKEN))return json({error:'Потрібен доступ адміністратора'},401);
       if(!env.DB)return json({error:'База даних недоступна'},503);
       if(path==='/api/admin/content'&&request.method==='GET'){
-        const [mentors,recordings,users]=await Promise.all([
+        const [mentors,recordings,users,broadcasts]=await Promise.all([
           env.DB.prepare('SELECT * FROM mentors ORDER BY updated_at DESC').all(),
           env.DB.prepare('SELECT id,title,description,source,license,published,updated_at FROM recordings ORDER BY updated_at DESC').all(),
           env.DB.prepare('SELECT COUNT(*) AS count FROM users').first(),
-        ]);return json({mentors:mentors.results,recordings:recordings.results,users:users.count,googleEnabled:configured(env)});
+          env.DB.prepare('SELECT * FROM broadcasts ORDER BY starts_at DESC').all(),
+        ]);return json({mentors:mentors.results,recordings:recordings.results,broadcasts:broadcasts.results,users:users.count,googleEnabled:configured(env)});
       }
-      if(!['/api/admin/mentors','/api/admin/recordings'].includes(path)||request.method!=='POST')return json({error:'Маршрут не знайдено'},404);
+      if(!['/api/admin/mentors','/api/admin/recordings','/api/admin/broadcasts'].includes(path)||request.method!=='POST')return json({error:'Маршрут не знайдено'},404);
       if(Number(request.headers.get('Content-Length'))>1500000)return json({error:'Файл завеликий'},413);
       const raw=await request.text();if(raw.length>1500000)return json({error:'Файл завеликий'},413);
       const body=JSON.parse(raw);
       const id=body.id||crypto.randomUUID();if(!/^[a-f0-9-]{36}$/.test(id))throw Error('Невірний ідентифікатор');
       const published=body.published===true||body.published===1?1:0;
-      if(path.endsWith('/mentors')){
+      if(path.endsWith('/broadcasts')){
+        const title=text(body.title,150,true),description=text(body.description,5000,true),speaker=text(body.speaker,150,true);
+        const startsAt=text(body.starts_at,40,true);if(!Number.isFinite(Date.parse(startsAt)))throw Error('Вкажи дату ефіру');
+        const youtubeId=text(body.youtube_id,30,true);if(!/^[A-Za-z0-9_-]{11}$/.test(youtubeId))throw Error('Потрібен 11-символьний YouTube video ID');
+        const status=text(body.status,20,true);if(!['scheduled','live','ended'].includes(status))throw Error('Невірний стан ефіру');
+        await env.DB.prepare('INSERT INTO broadcasts (id,title,description,speaker,starts_at,youtube_id,status,published,updated_at) VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET title=excluded.title,description=excluded.description,speaker=excluded.speaker,starts_at=excluded.starts_at,youtube_id=excluded.youtube_id,status=excluded.status,published=excluded.published,updated_at=excluded.updated_at').bind(id,title,description,speaker,new Date(startsAt).toISOString(),youtubeId,status,published,now()).run();
+      }else if(path.endsWith('/mentors')){
         await env.DB.prepare('INSERT INTO mentors (id,name,specialty,bio,photo,published,updated_at) VALUES (?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,specialty=excluded.specialty,bio=excluded.bio,photo=excluded.photo,published=excluded.published,updated_at=excluded.updated_at').bind(id,text(body.name,150,true),text(body.specialty,200,true),text(body.bio,3000,true),url(body.photo||''),published,now()).run();
       }else{
         const title=text(body.title,150,true),description=text(body.description,5000,true),source=url(body.source,true),license=text(body.license,300,true);

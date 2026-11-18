@@ -1,3 +1,4 @@
+import {Localized,useLanguage} from '../lib/language';
 import {useEffect, useMemo, useRef, useState} from 'react';
 import {Maximize2, Minimize2, Minus, Pause, Play, Plus, RotateCcw} from 'lucide-react';
 import {rhythms, type RhythmId} from '../lib/data';
@@ -17,6 +18,7 @@ type Props = {
 };
 
 export default function LiveEcg({rhythm='sinus', variant=0, record, compact=false, blind=false, initiallyPaused=false, allLeads=false}: Props) {
+  const {language}=useLanguage();
   const canvas = useRef<HTMLCanvasElement>(null);
   const container = useRef<HTMLElement>(null);
   const time = useRef(0);
@@ -25,7 +27,7 @@ export default function LiveEcg({rhythm='sinus', variant=0, record, compact=fals
   const [rate, setRate] = useState(1);
   const [zoom, setZoom] = useState(1);
   const [gain, setGain] = useState(1);
-  const [count, setCount] = useState(allLeads ? 12 : compact ? 1 : 3);
+  const [count, setCount] = useState(allLeads ? 12 : compact ? 1 : 6);
   const [position, setPosition] = useState(0);
   const [full, setFull] = useState(false);
   const [expanded, setExpanded] = useState(false);
@@ -45,11 +47,11 @@ export default function LiveEcg({rhythm='sinus', variant=0, record, compact=fals
   const showPlayhead = maxStart === 0;
   const maxPosition = showPlayhead ? duration : maxStart;
   const visible = useMemo(() => signal.leads.slice(0, count), [signal, count]);
-  const formattedTime = (value: number) => value.toLocaleString('uk-UA', {minimumFractionDigits:1, maximumFractionDigits:1});
+  const formattedTime = (value: number) => value.toLocaleString(language, {minimumFractionDigits:1, maximumFractionDigits:1});
 
   useEffect(() => {time.current = 0; setPosition(0)}, [signal]);
   useEffect(() => {
-    setCount(allLeads ? 12 : compact ? 1 : 3);
+    setCount(allLeads ? 12 : compact ? 1 : 6);
     if (allLeads) setPlaying(false);
   }, [allLeads, compact]);
   useEffect(() => {
@@ -213,7 +215,7 @@ export default function LiveEcg({rhythm='sinus', variant=0, record, compact=fals
       if (plotWidth > 0) seek(drag.current.time + (showPlayhead ? delta : -delta) * windowSec / plotWidth);
     }}
     onLostPointerCapture={()=>{drag.current=null}}/>;
-  return <section className={'live-monitor '+(compact?'compact':expanded?'expanded':'')} ref={container} aria-label="Переглядач ЕКГ" role={expanded?'dialog':undefined} aria-modal={expanded||undefined}>
+  return <Localized><section className={'live-monitor '+(compact?'compact':expanded?'expanded':'')} ref={container} aria-label="Переглядач ЕКГ" role={expanded?'dialog':undefined} aria-modal={expanded||undefined}>
     <div className="live-header"><div><span className={'live-dot '+(!playing?'paused':'')}/><span>{record?record.source+' · РЕАЛЬНИЙ ЗАПИС':'НАВЧАЛЬНИЙ СИМУЛЯТОР'}</span></div><span>{description}</span>{!compact&&<button aria-label={full||expanded?'Вийти з повного екрана':'На повний екран'} onClick={toggleFullscreen}>{full||expanded?<Minimize2 size={16}/>:<Maximize2 size={16}/>}</button>}</div>
     {compact&&plot}
     <div className="live-controls">
@@ -233,5 +235,5 @@ export default function LiveEcg({rhythm='sinus', variant=0, record, compact=fals
       <div className="ecg-timeline"><label>{showPlayhead?'Курсор':'Початок вікна'} <strong>{formattedTime(Math.min(position,maxPosition))} с</strong><input type="range" aria-label="Позиція на стрічці" min={0} max={maxPosition} step={.01} value={Math.min(position,maxPosition)} onChange={event=>{setPlaying(false);seek(Number(event.target.value))}}/></label><span>{formattedTime(duration)} с запису</span></div>
       {plot}
     </>}
-  </section>;
+  </section></Localized>;
 }

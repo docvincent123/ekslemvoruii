@@ -1,7 +1,9 @@
+import {newArticles} from './new-articles';
 import {illustratedArticles} from './illustrated-articles';
 export type DiagramKind='cycle'|'grid'|'leads'|'workflow'|'regularity'|'artifact';
 export type Article={diagram?:DiagramKind;caseId?:string;id:string;category:string;title:string;subtitle:string;minutes:number;rhythm:'sinus'|'afib'|'pvc'|'svt';sections:{title:string;paragraphs:string[]}[];exercise:{question:string;answer:string};sources:{title:string;url:string}[]};
 export const articles:Article[]=[
+...newArticles,
 ...illustratedArticles,
 {id:'first-ecg',category:'Основи',title:'Перша ЕКГ: від розгубленості до послідовного опису',subtitle:'Як побудувати власний порядок дій і не намагатися впізнати все з першого погляду.',minutes:9,rhythm:'sinus',sections:[
 {title:'Чому «впізнати картинку» недостатньо',paragraphs:['Коли перед тобою вперше з’являються дванадцять відведень, погляд зазвичай чіпляється за найвищий зубець або незвичну лінію. Це природно, але такий початок легко збиває з маршруту. Замість випадкового пошуку діагнозу спробуй поставити простіше завдання: назвати те, що справді видно. Де починається комплекс? Чи повторюється він? Чи однакові проміжки? Які відведення перед тобою?','У навчанні корисно розділяти спостереження та інтерпретацію. «Між комплексами різні відстані» — спостереження. «Це фібриляція передсердь» — припущення, для якого потрібно більше аргументів. Записуй ці дві частини окремо. Тоді помилка перетворюється з незрозумілого провалу на конкретну прогалину, яку можна виправити.']},

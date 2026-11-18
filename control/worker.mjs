@@ -10,7 +10,7 @@ export default {
   if(url.pathname.startsWith('/api/')){
    if(!env.ACADEMY_ORIGIN||!env.ADMIN_SERVICE_TOKEN)return Response.json({error:'Не налаштовано з’єднання з академією.'},{status:503});
    if(request.method!=='GET'&&(request.method!=='POST'||request.headers.get('Origin')!==url.origin))return new Response(null,{status:403});
-   const routes={'/api/content':'/api/admin/content','/api/mentors':'/api/admin/mentors','/api/recordings':'/api/admin/recordings'};
+   const routes={'/api/content':'/api/admin/content','/api/mentors':'/api/admin/mentors','/api/recordings':'/api/admin/recordings','/api/broadcasts':'/api/admin/broadcasts'};
    if(!routes[url.pathname])return new Response(null,{status:404});
    if(Number(request.headers.get('Content-Length'))>1500000)return Response.json({error:'Файл завеликий.'},{status:413});
    const body=request.method==='POST'?await request.text():undefined;
