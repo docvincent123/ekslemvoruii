@@ -6,4 +6,5 @@ import './style.css';
 import './lab.css';
 import './design.css';
 import './studio.css';
+import './readability.css';
 createRoot(document.getElementById('root')!).render(<React.StrictMode><LanguageProvider><App/></LanguageProvider></React.StrictMode>);

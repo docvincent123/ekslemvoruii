@@ -45,3 +45,34 @@ test('broadcast drafts remain private and publication updates one session',async
  const list=(await(await serveApi(request('/api/broadcasts'),env)).json()).broadcasts;assert.equal(list.length,1);assert.equal(list[0].status,'live');
  assert.equal((await serveApi(post('/api/admin/broadcasts',{...body,youtube_id:'invalid'}),env)).status,400);
 });
+test('single-use recovery changes the password and invalidates all previous sessions',async()=>{
+ const DB=database(),env={DB};
+ const profile={name:'Recovery Student',email:'recovery@example.test',password:'previous-long-password-2026'};
+ const registration=await serveApi(authRequest('/api/register',profile),env);
+ const data=await registration.json();
+ assert.match(data.recoveryCode,/^(?:[A-F0-9]{5}-){7}[A-F0-9]{5}$/);
+ const stored=DB.sqlite.prepare('SELECT code_hash FROM recovery_codes').get();assert.notEqual(stored.code_hash,data.recoveryCode);
+ const oldSession=registration.headers.get('Set-Cookie').split(';')[0];
+ const invalid=await serveApi(authRequest('/api/recover',{email:profile.email,recoveryCode:'0'.repeat(40),password:'replacement-password-2026'}),env);assert.equal(invalid.status,400);
+ const before=await(await serveApi(request('/api/session',{headers:{Cookie:oldSession}}),env)).json();assert.equal(before.user.email,profile.email);
+ const reset=await serveApi(authRequest('/api/recover',{email:profile.email,recoveryCode:data.recoveryCode,password:'replacement-password-2026'}),env);assert.equal(reset.status,200);
+ const after=await(await serveApi(request('/api/session',{headers:{Cookie:oldSession}}),env)).json();assert.equal(after.user,null);
+ assert.equal((await serveApi(authRequest('/api/login',profile),env)).status,401);
+ assert.equal((await serveApi(authRequest('/api/login',{...profile,password:'replacement-password-2026'}),env)).status,200);
+ assert.equal((await serveApi(authRequest('/api/recover',{email:profile.email,recoveryCode:data.recoveryCode,password:'another-long-password-2026'}),env)).status,400);
+});
+test('an existing email account can rotate its recovery code only after password confirmation',async()=>{
+ const DB=database(),env={DB};
+ const profile={name:'Existing Account',email:'existing@example.test',password:'existing-long-password-2026'};
+ const registration=await serveApi(authRequest('/api/register',profile),env);
+ const initial=await registration.json(),cookie=registration.headers.get('Set-Cookie').split(';')[0];
+ // Model an account created before recovery codes were introduced.
+ DB.sqlite.exec('DELETE FROM recovery_codes');
+ const generate=password=>request('/api/account/recovery-code',{method:'POST',headers:{Origin:origin,Cookie:cookie,'Content-Type':'application/json'},body:JSON.stringify({password})});
+ assert.equal((await serveApi(generate('incorrect-long-password'),env)).status,401);
+ const generated=await(await serveApi(generate(profile.password),env)).json();assert.ok(generated.recoveryCode);
+ const rotated=await(await serveApi(generate(profile.password),env)).json();assert.ok(rotated.recoveryCode);assert.notEqual(generated.recoveryCode,rotated.recoveryCode);
+ assert.equal((await serveApi(authRequest('/api/recover',{email:profile.email,recoveryCode:initial.recoveryCode,password:'another-password-2026'}),env)).status,400);
+ assert.equal((await serveApi(authRequest('/api/recover',{email:profile.email,recoveryCode:generated.recoveryCode,password:'another-password-2026'}),env)).status,400);
+ assert.equal((await serveApi(authRequest('/api/recover',{email:profile.email,recoveryCode:rotated.recoveryCode,password:'another-password-2026'}),env)).status,200);
+});

@@ -14,7 +14,7 @@ function configured(env) {return Boolean(env.DB&&env.GOOGLE_CLIENT_ID&&env.GOOGL
 async function getUser(request,env) {
   const token=cookies(request)[sessionCookie];
   if(!token||!env.DB)return null;
-  return env.DB.prepare('SELECT users.id, users.name, users.email FROM sessions JOIN users ON users.id=sessions.user_id WHERE token_hash=? AND expires_at>?').bind(await digest(token),now()).first();
+  return env.DB.prepare('SELECT users.id, users.name, users.email, users.provider FROM sessions JOIN users ON users.id=sessions.user_id WHERE token_hash=? AND expires_at>?').bind(await digest(token),now()).first();
 }
 async function passwordHash(password,salt) {
   const key=await crypto.subtle.importKey('raw',encoder.encode(password),'PBKDF2',false,['deriveBits']);
@@ -27,6 +27,17 @@ async function createSession(userId,env) {
     env.DB.prepare('INSERT INTO sessions (token_hash,user_id,expires_at) VALUES (?,?,?)').bind(await digest(token),userId,now()+2592000),
   ]);
   return cookie(sessionCookie,token,2592000);
+}
+function newRecoveryCode(){
+  return Array.from(crypto.getRandomValues(new Uint8Array(20)),value=>value.toString(16).padStart(2,'0')).join('').toUpperCase().match(/.{5}/g).join('-');
+}
+function normalizeRecoveryCode(value){return typeof value==='string'?value.replace(/[\s-]/g,'').toUpperCase():'';}
+async function matchesPassword(password,credential){
+  const actual=await passwordHash(password,credential?.salt||'unregistered-account');
+  const expected=credential?.password_hash||'0'.repeat(actual.length);
+  let difference=actual.length^expected.length;
+  for(let i=0;i<actual.length;i++)difference|=actual.charCodeAt(i)^expected.charCodeAt(i);
+  return Boolean(credential)&&difference===0;
 }
 async function allowAuth(request,email,env) {
   const ip=request.headers.get('CF-Connecting-IP')||'unknown';
@@ -97,29 +108,62 @@ export async function serveApi(request,env={}) {
       if(!await allowAuth(request,email,env))return json({error:'Забагато спроб. Спробуй через 15 хвилин'},429);
       const password=body.password;
       if(typeof password!=='string'||password.length<12||password.length>128)return json({error:'Пароль має містити від 12 до 128 символів'},400);
-      let user;
+      let user,recoveryCode;
       if(path==='/api/register'){
         const name=text(body.name,120,true);
         const existing=await env.DB.prepare('SELECT user_id FROM credentials WHERE email=?').bind(email).first();
         if(existing)return json({error:'Цей email уже зареєстровано. Увійди у свій профіль'},409);
         const id=crypto.randomUUID(),salt=random(),hash=await passwordHash(password,salt);
+        recoveryCode=newRecoveryCode();
+        const recoveryHash=await digest(normalizeRecoveryCode(recoveryCode));
         try{
           await env.DB.batch([
             env.DB.prepare('INSERT INTO users (id,provider,subject,name,email,created_at) VALUES (?,?,?,?,?,?)').bind(id,'email','email:'+email,name,email,now()),
             env.DB.prepare('INSERT INTO credentials (email,user_id,salt,password_hash) VALUES (?,?,?,?)').bind(email,id,salt,hash),
+            env.DB.prepare('INSERT INTO recovery_codes (user_id,code_hash,created_at) VALUES (?,?,?)').bind(id,recoveryHash,now()),
           ]);
         }catch{return json({error:'Не вдалося зареєструвати профіль. Перевір email і спробуй увійти'},409);}
-        user={id,name,email};
+        user={id,name,email,provider:'email'};
       }else{
         const credential=await env.DB.prepare('SELECT * FROM credentials WHERE email=?').bind(email).first();
-        const actual=await passwordHash(password,credential?.salt||'unregistered-account');
-        const expected=credential?.password_hash||'0'.repeat(actual.length);
-        let different=actual.length^expected.length;
-        for(let i=0;i<actual.length;i++)different|=actual.charCodeAt(i)^expected.charCodeAt(i);
-        if(!credential||different)return json({error:'Невірний email або пароль'},401);
-        user=await env.DB.prepare('SELECT id,name,email FROM users WHERE id=?').bind(credential.user_id).first();
+        if(!await matchesPassword(password,credential))return json({error:'Невірний email або пароль'},401);
+        user=await env.DB.prepare('SELECT id,name,email,provider FROM users WHERE id=?').bind(credential.user_id).first();
       }
-      const response=json({user});response.headers.set('Set-Cookie',await createSession(user.id,env));return response;
+      const response=json({user,recoveryCode});response.headers.set('Set-Cookie',await createSession(user.id,env));return response;
+    }
+    if(path==='/api/account/recovery-code'&&request.method==='POST'){
+      if(!sameOrigin(request))return json({error:'Запит відхилено'},403);
+      const user=await getUser(request,env);if(!user)return json({error:'Спочатку увійди у профіль'},401);
+      const raw=await request.text();if(raw.length>8192)return json({error:'Запит завеликий'},413);
+      const {password}=JSON.parse(raw);
+      if(typeof password!=='string'||password.length<12||password.length>128)return json({error:'Введи поточний пароль'},400);
+      if(!await allowAuth(request,user.email,env))return json({error:'Забагато спроб. Спробуй через 15 хвилин'},429);
+      const credential=await env.DB.prepare('SELECT * FROM credentials WHERE user_id=?').bind(user.id).first();
+      if(!await matchesPassword(password,credential))return json({error:'Невірний email або пароль'},401);
+      const recoveryCode=newRecoveryCode(),codeHash=await digest(normalizeRecoveryCode(recoveryCode));
+      await env.DB.prepare('INSERT INTO recovery_codes (user_id,code_hash,created_at) VALUES (?,?,?) ON CONFLICT(user_id) DO UPDATE SET code_hash=excluded.code_hash,created_at=excluded.created_at').bind(user.id,codeHash,now()).run();
+      return json({recoveryCode});
+    }
+    if(path==='/api/recover'&&request.method==='POST'){
+      if(!sameOrigin(request))return json({error:'Запит відхилено'},403);
+      if(!env.DB)return json({error:'Сервіс тимчасово недоступний'},503);
+      const raw=await request.text();if(raw.length>8192)return json({error:'Запит завеликий'},413);
+      const body=JSON.parse(raw),email=text(body.email,254,true).toLowerCase();
+      if(!await allowAuth(request,email,env))return json({error:'Забагато спроб. Спробуй через 15 хвилин'},429);
+      const code=normalizeRecoveryCode(body.recoveryCode),password=body.password;
+      if(typeof password!=='string'||password.length<12||password.length>128)return json({error:'Пароль має містити від 12 до 128 символів'},400);
+      if(!/^[A-F0-9]{40}$/.test(code))return json({error:'Невірний email або резервний код'},400);
+      const credential=await env.DB.prepare('SELECT user_id FROM credentials WHERE email=?').bind(email).first();
+      if(!credential)return json({error:'Невірний email або резервний код'},400);
+      const codeHash=await digest(code),salt=random(),hash=await passwordHash(password,salt);
+      const match='EXISTS (SELECT 1 FROM recovery_codes WHERE user_id=? AND code_hash=?)';
+      const results=await env.DB.batch([
+        env.DB.prepare('UPDATE credentials SET salt=?,password_hash=? WHERE user_id=? AND '+match).bind(salt,hash,credential.user_id,credential.user_id,codeHash),
+        env.DB.prepare('DELETE FROM sessions WHERE user_id=? AND '+match).bind(credential.user_id,credential.user_id,codeHash),
+        env.DB.prepare('DELETE FROM recovery_codes WHERE user_id=? AND code_hash=?').bind(credential.user_id,codeHash),
+      ]);
+      if(!(results[0].meta?.changes??results[0].changes))return json({error:'Невірний email або резервний код'},400);
+      return json({ok:true});
     }
     if(path==='/auth/google'&&request.method==='GET'){
       if(!configured(env))return redirect('/?auth=setup');
