@@ -1,0 +1,6 @@
+import {sqliteTable, text, integer} from 'drizzle-orm/sqlite-core';
+export const users = sqliteTable('users', {id:text('id').primaryKey(),provider:text('provider').notNull(),subject:text('subject').notNull().unique(),name:text('name').notNull(),email:text('email').notNull(),createdAt:integer('created_at').notNull()});
+export const sessions = sqliteTable('sessions', {tokenHash:text('token_hash').primaryKey(),userId:text('user_id').notNull().references(()=>users.id),expiresAt:integer('expires_at').notNull()});
+export const oauth = sqliteTable('oauth_states', {state:text('state').primaryKey(),nonce:text('nonce').notNull(),verifier:text('verifier').notNull(),expiresAt:integer('expires_at').notNull()});
+export const mentors = sqliteTable('mentors', {id:text('id').primaryKey(),name:text('name').notNull(),specialty:text('specialty').notNull(),bio:text('bio').notNull(),photo:text('photo').notNull(),published:integer('published').notNull().default(0),updatedAt:integer('updated_at').notNull()});
+export const recordings = sqliteTable('recordings', {id:text('id').primaryKey(),title:text('title').notNull(),description:text('description').notNull(),source:text('source').notNull(),license:text('license').notNull(),signal:text('signal').notNull(),published:integer('published').notNull().default(0),updatedAt:integer('updated_at').notNull()});
