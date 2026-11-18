@@ -115,8 +115,8 @@ export async function serveApi(request,env={}) {
       return row?json(JSON.parse(row.signal)):json({error:'Запис не знайдено'},404);
     }
     if(path.startsWith('/api/admin/')){
-      const authorization=request.headers.get('Authorization')||'';
-      if(!env.ADMIN_SERVICE_TOKEN||await digest(authorization)!==await digest('Bearer '+env.ADMIN_SERVICE_TOKEN))return json({error:'Потрібен доступ адміністратора'},401);
+      const authorization=request.headers.get('X-Lemvori-Admin-Token')||'';
+      if(!env.ADMIN_SERVICE_TOKEN||await digest(authorization)!==await digest(env.ADMIN_SERVICE_TOKEN))return json({error:'Потрібен доступ адміністратора'},401);
       if(!env.DB)return json({error:'База даних недоступна'},503);
       if(path==='/api/admin/content'&&request.method==='GET'){
         const [mentors,recordings,users]=await Promise.all([

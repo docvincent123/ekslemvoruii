@@ -10,14 +10,15 @@ export async function serveEcg(request, recordIds, fetchUpstream = fetch) {
     `https://physionet-open.s3.amazonaws.com/ptb-xl/1.0.3/${file}`,
     `https://physionet.org/files/ptb-xl/1.0.3/${file}`,
   ];
+  const diagnostics = [];
   for (const url of sources) {
     try {
-      const response = await fetchUpstream(url, {redirect: 'error', signal: AbortSignal.timeout(10000)});
-      if (!response.ok) continue;
+      const response = await fetchUpstream(url, {redirect: 'manual', signal: AbortSignal.timeout(10000)});
+      if (!response.ok) {diagnostics.push(String(response.status));continue;}
       let body = await response.arrayBuffer();
       if (extension === 'hea') {
         const lines = new TextDecoder().decode(body).split(/\r?\n/);
-        if (!new RegExp(`^${id}_lr\\s+12\\s+100(?:\\s|$)`).test(lines[0]) || lines.length < 13) continue;
+        if (!new RegExp(`^${id}_lr\\s+12\\s+100(?:\\s|$)`).test(lines[0]) || lines.length < 13) {diagnostics.push('header');continue;}
         body = new TextEncoder().encode(lines.slice(0, 13).join('\n') + '\n');
       } else if (body.byteLength !== 24000) continue;
       return new Response(body, {headers: {
@@ -25,7 +26,7 @@ export async function serveEcg(request, recordIds, fetchUpstream = fetch) {
         'Cache-Control': 'public, max-age=604800',
         'X-Content-Type-Options': 'nosniff',
       }});
-    } catch {}
+    } catch (error) {diagnostics.push(error.name || 'fetch');}
   }
-  return new Response('Джерела тимчасово недоступні. Спробуй ще раз.', {status: 502});
+  return new Response('Джерела тимчасово недоступні. Спробуй ще раз.', {status: 502,headers:{'X-ECG-Source-Status':diagnostics.join(',')}});
 }

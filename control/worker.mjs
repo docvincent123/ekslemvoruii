@@ -16,7 +16,8 @@ export default {
    const body=request.method==='POST'?await request.text():undefined;
    if(body?.length>1500000)return Response.json({error:'Файл завеликий.'},{status:413});
    try{
-    const result=await fetch(new URL(routes[url.pathname],env.ACADEMY_ORIGIN),{method:request.method,headers:{Authorization:'Bearer '+env.ADMIN_SERVICE_TOKEN,'Content-Type':'application/json'},body,redirect:'error',signal:AbortSignal.timeout(15000)});
+    const result=await fetch(new URL(routes[url.pathname],env.ACADEMY_ORIGIN),{method:request.method,headers:{'X-Lemvori-Admin-Token':env.ADMIN_SERVICE_TOKEN,'Content-Type':'application/json'},body,redirect:'manual',signal:AbortSignal.timeout(15000)});
+    if(result.status>=300&&result.status<400)return Response.json({error:'Сервер академії повернув неочікуване перенаправлення.'},{status:502});
     return new Response(result.body,{status:result.status,headers:{'Content-Type':'application/json','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}});
    }catch{return Response.json({error:'З’єднання з академією тимчасово недоступне.'},{status:502});}
   }
